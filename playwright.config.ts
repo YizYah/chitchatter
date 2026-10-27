@@ -13,6 +13,12 @@ export default defineConfig({
   testDir: './e2e',
   /* Global timeout for each test */
   timeout: 30 * 1000,
+  /* Default timeout for `expect(...)` assertions. Bumped from the 5s default since the
+     dev server (Vite, unbundled) can be slow to cold-compile the first few modules it
+     serves under CPU-constrained CI/sandbox environments. */
+  expect: {
+    timeout: 15 * 1000,
+  },
   /* Run tests in files in parallel */
   fullyParallel: false,
   /* Fail the build on CI if you accidentally left test.only in the source code. */
@@ -53,10 +59,10 @@ export default defineConfig({
     headless: true,
 
     /* Action timeout */
-    actionTimeout: 10 * 1000,
+    actionTimeout: 15 * 1000,
 
     /* Navigation timeout */
-    navigationTimeout: 15 * 1000,
+    navigationTimeout: 20 * 1000,
   },
 
   /* Configure projects for major browsers */
@@ -66,9 +72,14 @@ export default defineConfig({
       use: {
         ...devices['Desktop Chrome'],
         /* Disable mDNS local IP hiding so WebRTC connections between local browser contexts
-           can establish successfully in sandboxed/offline E2E environments without relying on system DNS */
+           can establish successfully in sandboxed/offline E2E environments without relying on system DNS.
+           Also disable /dev/shm usage since containers often mount it too small, which otherwise
+           crashes the renderer (surfaces as "Target page, context or browser has been closed"). */
         launchOptions: {
-          args: ['--disable-features=WebRtcHideLocalIpsWithMdns'],
+          args: [
+            '--disable-features=WebRtcHideLocalIpsWithMdns',
+            '--disable-dev-shm-usage',
+          ],
         },
       },
     },
