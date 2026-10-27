@@ -90,9 +90,60 @@ real CI/other machines that already have proper system libs.
   timeouts. No application code changed; the ChatRoom error-alert logic from the prior
   pass is untouched and still fully covered by Vitest.
 
+## Regression re-run — same env issue recurred, made the fix self-healing + fixed the real flake
+
+A later regression pass again reported all 37 e2e tests failing with
+`browserType.launch: Target page, context or browser has been closed` /
+`libnspr4.so: cannot open shared object file`. Root cause was unchanged from the prior
+pass (missing system shared libs + fontconfig in this sandbox), but the regression
+harness invokes `npm run test:e2e` directly — it does **not** source the manual
+`LD_LIBRARY_PATH`/`FONTCONFIG_FILE` env vars from the previous session's shell, so the
+committed `playwright.config.ts` from last time (timeouts + `--disable-dev-shm-usage`)
+never got a chance to matter; every test failed before a browser even launched.
+
+Fix: made the config **self-healing** instead of relying on a manually-exported env var.
+Added a guard at the top of `playwright.config.ts` that checks `fs.existsSync()` for the
+known pre-staged workaround paths (`/tmp/localroot/.../libnspr4.so` dir,
+`/tmp/fcconfig/fonts.conf`) and sets `process.env.LD_LIBRARY_PATH` /
+`process.env.FONTCONFIG_FILE` only if they exist. This is a no-op on any machine where
+those paths don't exist (real CI, other sandboxes) — it only activates in a session that
+already has the pre-staged libs, which removes the need to remember to `export` anything
+by hand before running `npm run test:e2e`.
+
+Second, separate issue found once the browser-launch failure was fixed: with the config's
+default (non-CI) `workers: undefined`, Playwright auto-detected **5** workers on this
+machine's `nproc` (64), wildly over-committing the actual ~2-vCPU cgroup cap noted in the
+prior pass. Running 37 tests across 5 concurrent Chromium instances + a cold-compiling
+Vite dev server caused ~4-6 tests to fail/flake every run (timeouts waiting for the first
+paint), even with the 15s/20s timeout bumps already in place — confirmed by re-running
+the exact same failing tests with `--workers=1`/`--workers=2`: 100% green, every time.
+Fixed by capping `workers: process.env.CI ? 1 : 2` instead of leaving it CPU-count-based.
+2 workers was enough to keep some parallelism benefit without saturating the sandbox;
+tested and got **37/37 passed, zero retries needed** at that concurrency.
+
+Also hit one flaky **unit** test in this pass, unrelated to e2e or this diff:
+`ChatRoom.test.ts > marks a peer UNVERIFIED when its signature does not match its key`
+failed once in a full `vitest run` (assertion raced ahead of an async verification
+event) but passed immediately when re-run in isolation or as part of a second full-suite
+run. Did not change any test/source code for this — it's pre-existing timing flakiness,
+not something introduced here, and reproducing it required no action from this diff.
+
+Net result: full e2e suite (`npm run test:e2e`, no manual env setup) now passes
+**37/37, 0 failures, 0 flaky**, and the full vitest suite passes **333/333** on a clean
+re-run. Both the lib-path/fontconfig and worker-count fixes are now baked into the
+committed `playwright.config.ts`, so this should self-heal on the next regression pass
+in this same sandbox without needing this lessons file re-read for the env var trick.
+
+## Files Modified (this pass)
+
+- `playwright.config.ts` — added `fs.existsSync()`-guarded auto-detection of pre-staged
+  sandbox lib/fontconfig paths (sets `LD_LIBRARY_PATH`/`FONTCONFIG_FILE` only if present,
+  no-op elsewhere); capped non-CI `workers` from CPU-count-based default to `2` to avoid
+  overcommitting this sandbox's constrained cgroup CPU cap. No application code touched.
+
 ## Next Steps
 
-- Done. Vitest suite + typecheck still pass. e2e is as green as this sandbox's CPU/RAM
-  caps allow; remaining single flake is a pre-existing WebRTC-timing issue unrelated to
-  this diff. Note both the `playwright.config.ts` robustness fix and the residual
-  sandbox-CPU-cap caveat in the PR body.
+- Done. Vitest suite + typecheck still pass. e2e now passes 37/37 with zero flakes via
+  `npm run test:e2e` directly (no manual env vars needed). Vitest full suite 333/333 on
+  clean re-run (one unit test flaked once under full-suite timing contention, passed on
+  every retry/isolation run — pre-existing, unrelated to this diff).
