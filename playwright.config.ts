@@ -1,10 +1,31 @@
 import { defineConfig, devices } from '@playwright/test'
+import fs from 'fs'
 
 /**
  * Read environment variables from file.
  * https://github.com/motdotla/dotenv
  */
 // require('dotenv').config();
+
+/* Some containerized/sandboxed CI hosts are missing system shared libraries
+ * (e.g. libnspr4.so) and a fontconfig file that headless Chromium needs to launch,
+ * causing every test to fail with "Target page, context or browser has been closed"
+ * before a browser is even up. If this host has a pre-staged copy of those libs
+ * available, wire them in. This is a no-op on hosts where these paths don't exist
+ * (i.e. normal CI/dev machines with proper system libs already installed). */
+const sandboxLibDirs = [
+  '/tmp/localroot/usr/lib/x86_64-linux-gnu',
+  '/tmp/localroot/lib/x86_64-linux-gnu',
+].filter(dir => fs.existsSync(dir))
+if (sandboxLibDirs.length > 0) {
+  process.env.LD_LIBRARY_PATH = [...sandboxLibDirs, process.env.LD_LIBRARY_PATH]
+    .filter(Boolean)
+    .join(':')
+}
+const sandboxFontConfigFile = '/tmp/fcconfig/fonts.conf'
+if (fs.existsSync(sandboxFontConfigFile)) {
+  process.env.FONTCONFIG_FILE = sandboxFontConfigFile
+}
 
 /**
  * See https://playwright.dev/docs/test-configuration.
@@ -13,14 +34,24 @@ export default defineConfig({
   testDir: './e2e',
   /* Global timeout for each test */
   timeout: 30 * 1000,
+  /* Default timeout for `expect(...)` assertions. Bumped from the 5s default since the
+     dev server (Vite, unbundled) can be slow to cold-compile the first few modules it
+     serves under CPU-constrained CI/sandbox environments. */
+  expect: {
+    timeout: 15 * 1000,
+  },
   /* Run tests in files in parallel */
   fullyParallel: false,
   /* Fail the build on CI if you accidentally left test.only in the source code. */
   forbidOnly: !!process.env.CI,
   /* Retry on CI only */
   retries: 2,
-  /* Opt out of parallel tests on CI. */
-  workers: process.env.CI ? 1 : undefined,
+  /* Opt out of parallel tests on CI. Cap local/non-CI runs to 2 workers instead of
+     the CPU-count-based default: each worker spins up its own dev-server requests and
+     Chromium instance, and under CPU-constrained CI/sandbox environments too much
+     concurrency causes the dev server's cold compile + WebRTC crypto init to blow
+     through test timeouts, producing flaky failures unrelated to the app itself. */
+  workers: process.env.CI ? 1 : 2,
   /* Reporter to use. See https://playwright.dev/docs/test-reporters */
   reporter: process.env.CI
     ? [['github'], ['html', { outputFolder: 'playwright-report' }]]
@@ -53,10 +84,10 @@ export default defineConfig({
     headless: true,
 
     /* Action timeout */
-    actionTimeout: 10 * 1000,
+    actionTimeout: 15 * 1000,
 
     /* Navigation timeout */
-    navigationTimeout: 15 * 1000,
+    navigationTimeout: 20 * 1000,
   },
 
   /* Configure projects for major browsers */
@@ -66,9 +97,14 @@ export default defineConfig({
       use: {
         ...devices['Desktop Chrome'],
         /* Disable mDNS local IP hiding so WebRTC connections between local browser contexts
-           can establish successfully in sandboxed/offline E2E environments without relying on system DNS */
+           can establish successfully in sandboxed/offline E2E environments without relying on system DNS.
+           Also disable /dev/shm usage since containers often mount it too small, which otherwise
+           crashes the renderer (surfaces as "Target page, context or browser has been closed"). */
         launchOptions: {
-          args: ['--disable-features=WebRtcHideLocalIpsWithMdns'],
+          args: [
+            '--disable-features=WebRtcHideLocalIpsWithMdns',
+            '--disable-dev-shm-usage',
+          ],
         },
       },
     },

@@ -2,7 +2,7 @@ import { useContext, useEffect, useRef, useState } from 'react'
 
 import { usePeerNameDisplay } from 'components/PeerNameDisplay'
 import { ChatRoom } from 'core/chat/ChatRoom'
-import { ChatRoomEvent } from 'core/chat/events'
+import { ChatRoomEvent, ChatRoomErrorContext } from 'core/chat/events'
 import { isInlineMedia } from 'core/models/chat'
 import { SettingsContext } from 'contexts/SettingsContext'
 import { ShellContext } from 'contexts/ShellContext'
@@ -89,6 +89,44 @@ export const useChatRoomNotifications = (
               ? `${displayUsername} shared media`
               : `${displayUsername}: ${message.text}`
           )
+        }
+      }),
+
+      // Operations the user just performed on purpose report their failures
+      // here instead of throwing; surface those so a failed send is not silent.
+      // Background, ephemeral and teardown failures stay logger-only.
+      chatRoom.on(ChatRoomEvent.ERROR, ({ context }) => {
+        switch (context) {
+          case ChatRoomErrorContext.SEND_MESSAGE:
+            latest.current.showAlert('Your message could not be sent', {
+              severity: 'error',
+            })
+            break
+          case ChatRoomErrorContext.SEND_INLINE_MEDIA:
+            latest.current.showAlert('Your media could not be sent', {
+              severity: 'error',
+            })
+            break
+          case ChatRoomErrorContext.RESCIND_FILE_OFFER:
+            latest.current.showAlert('The file could not be unshared', {
+              severity: 'error',
+            })
+            break
+          // Background, ephemeral and teardown paths: logged, not surfaced.
+          case ChatRoomErrorContext.ANNOUNCE_SELF:
+          case ChatRoomErrorContext.GREET_PEER:
+          case ChatRoomErrorContext.REFRESH_CONNECTION_TYPES:
+          case ChatRoomErrorContext.SEND_TYPING_STATUS:
+          case ChatRoomErrorContext.STOP_SEEDING:
+          case ChatRoomErrorContext.LEAVE:
+            break
+          default: {
+            // Exhaustiveness guard: a new ChatRoomErrorContext must make a
+            // deliberate show/suppress decision here, or this fails to compile.
+            const unhandled: never = context
+
+            void unhandled
+          }
         }
       }),
 
